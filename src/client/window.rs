@@ -317,6 +317,35 @@ impl XpraWindow {
         let inner = self.window.inner_position().ok()?;
         Some(PhysicalPosition::new(inner_x + (outer.x - inner.x), inner_y + (outer.y - inner.y)))
     }
+
+    /// Where to actually put the frame, so that all of it lands on a monitor.
+    ///
+    /// The server positions the *client area*, so a window it places against the top of its
+    /// virtual screen gets a frame position above the top of the local one - and the title bar
+    /// is the only handle a decorated window has, so one that is off screen leaves the window
+    /// impossible to move, resize or close.
+    pub fn on_screen_position(&self, outer: PhysicalPosition<i32>) -> PhysicalPosition<i32> {
+        let Some(monitor) = self.window.current_monitor().or_else(|| self.window.primary_monitor())
+        else {
+            return outer;
+        };
+        let frame = self.window.outer_size();
+        clamp_to_monitor(outer, (frame.width, frame.height), monitor.position(),
+                         (monitor.size().width, monitor.size().height))
+    }
+}
+
+/// Keep a frame position inside a monitor, so that the whole frame stays visible. A window
+/// too big for the monitor is pinned to its top-left corner rather than pushed further off:
+/// that corner is the one carrying the title bar.
+fn clamp_to_monitor(outer: PhysicalPosition<i32>, frame: (u32, u32),
+                    origin: PhysicalPosition<i32>, monitor: (u32, u32)) -> PhysicalPosition<i32> {
+    let axis = |pos: i32, start: i32, frame: u32, span: u32| {
+        let last = start + (span as i32 - frame as i32).max(0);
+        pos.clamp(start, last.max(start))
+    };
+    PhysicalPosition::new(axis(outer.x, origin.x, frame.0, monitor.0),
+                          axis(outer.y, origin.y, frame.1, monitor.1))
 }
 
 
@@ -382,7 +411,48 @@ fn clip_rect(fw: u32, fh: u32, x: i32, y: i32, w: u32, h: u32) -> Option<Rect> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blit_into, clip_rect};
+    use super::{blit_into, clamp_to_monitor, clip_rect};
+    use winit::dpi::PhysicalPosition;
+
+    const SCREEN: (u32, u32) = (1920, 1200);
+    const ORIGIN: PhysicalPosition<i32> = PhysicalPosition::new(0, 0);
+    const WINDOW: (u32, u32) = (800, 600);
+
+    // the reported bug: the server puts the client area at the top of its virtual screen, the
+    // frame correction lifts the frame a title bar higher, and the title bar leaves the screen
+    #[test]
+    fn a_title_bar_above_the_screen_is_brought_back_down() {
+        let placed = clamp_to_monitor(PhysicalPosition::new(-7, -30), WINDOW, ORIGIN, SCREEN);
+        assert_eq!(placed, PhysicalPosition::new(0, 0));
+    }
+
+    #[test]
+    fn a_window_that_already_fits_is_left_alone() {
+        let wanted = PhysicalPosition::new(300, 200);
+        assert_eq!(clamp_to_monitor(wanted, WINDOW, ORIGIN, SCREEN), wanted);
+    }
+
+    #[test]
+    fn a_window_hanging_off_the_right_or_bottom_is_pulled_in() {
+        let placed = clamp_to_monitor(PhysicalPosition::new(1800, 1100), WINDOW, ORIGIN, SCREEN);
+        assert_eq!(placed, PhysicalPosition::new(1920 - 800, 1200 - 600));
+    }
+
+    // a window bigger than the monitor cannot fit; the corner that must stay reachable is the
+    // one with the title bar, so it is pinned there rather than pushed off the other way
+    #[test]
+    fn a_window_larger_than_the_monitor_is_pinned_to_its_top_left() {
+        let placed = clamp_to_monitor(PhysicalPosition::new(-500, -400), (2560, 1600), ORIGIN, SCREEN);
+        assert_eq!(placed, PhysicalPosition::new(0, 0));
+    }
+
+    // a second monitor does not start at (0,0), and may start at a negative coordinate
+    #[test]
+    fn the_monitors_own_origin_is_what_bounds_it() {
+        let origin = PhysicalPosition::new(-1920, -200);
+        let placed = clamp_to_monitor(PhysicalPosition::new(-1930, -230), WINDOW, origin, SCREEN);
+        assert_eq!(placed, origin);
+    }
 
     // the per-pixel loop this replaced, kept as the reference the fast path has to agree with
     fn reference(fb: &mut [u32], fw: u32, fh: u32,

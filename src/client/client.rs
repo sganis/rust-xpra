@@ -2255,9 +2255,12 @@ impl XpraClient {
         // once the window does. On a reparenting X11 window manager the frame is not there yet
         // either, which leaves the offset at zero and this a no-op - the `Moved` event that
         // follows the reparenting is what reports the real origin there.
+        // ... and then kept on screen: the correction above moves the frame up by the height
+        // of the title bar, which for a window the server placed at the top of its virtual
+        // screen puts that title bar - the only handle the window has - out of reach.
         if decorated {
             if let Some(outer) = xpra_window.to_outer_position(px, py) {
-                xpra_window.window.set_outer_position(outer);
+                xpra_window.window.set_outer_position(xpra_window.on_screen_position(outer));
             }
         }
         Self::apply_window_metadata(&mut xpra_window, metadata);
